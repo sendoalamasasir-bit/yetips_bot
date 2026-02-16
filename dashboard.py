@@ -4,23 +4,23 @@ import requests
 from datetime import datetime, timedelta
 
 # ==========================================
-# 1. CONFIGURACIÓN (LAS LLAVES DEL REINO)
+# 1. CONFIGURACIÓN
 # ==========================================
 
 # --- API FOOTBALL DATA ---
-# Si usas Streamlit Cloud, usa st.secrets. Si es local, pon tu clave directa.
 try:
     API_KEY = st.secrets["API_KEY"]
 except:
-    API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f" # <--- ¡PEGALA AQUÍ!
+    # He dejado tus claves para que te funcione ya, pero cámbialas si puedes.
+    API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f" 
 
 # --- TELEGRAM CONFIG ---
 try:
-    TG_TOKEN = st.secrets["8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"]
-    TG_CHAT_ID = st.secrets["1197028422"]
+    TG_TOKEN = st.secrets["TG_TOKEN"]
+    TG_CHAT_ID = st.secrets["TG_CHAT_ID"]
 except:
-    TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"     # <--- ¡PEGALO AQUÍ!
-    TG_CHAT_ID = "1197028422"   # <--- ¡PEGALO AQUÍ!
+    TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"
+    TG_CHAT_ID = "1197028422"
 
 # --- CONFIGURACIÓN DE LA LIGA ---
 COMPETITION_ID = 'PD' # Primera División
@@ -68,19 +68,26 @@ def enviar_telegram(mensaje):
 @st.cache_data
 def cargar_bases_datos():
     try:
-        # A) FBref
+        # A) FBref (Goles y Tarjetas)
         df_goals = pd.read_csv('liga_stand_25 - Hoja 1.csv', header=1)[['Squad', '90s', 'Gls']]
         df_misc = pd.read_csv('misc25sp - Hoja 1.csv', header=1)[['Squad', 'Off', 'CrdY', 'CrdR']]
         df_fbref = df_goals.merge(df_misc, on='Squad', how='inner')
         
         df_fbref['90s'] = df_fbref['90s'].apply(clean_num)
+        
+        # Goles por partido
         df_fbref['G_p'] = df_fbref['Gls'].apply(clean_num) / df_fbref['90s']
+        # Offsides por partido
         df_fbref['O_p'] = df_fbref['Off'].apply(clean_num) / df_fbref['90s']
+        
+        # Tarjetas (Puntos y Amarillas puras)
         y = df_fbref['CrdY'].apply(clean_num)
         r = df_fbref['CrdR'].apply(clean_num)
-        df_fbref['C_p'] = ((y * 10) + (r * 25)) / df_fbref['90s']
+        
+        df_fbref['C_p'] = ((y * 10) + (r * 25)) / df_fbref['90s'] # Puntos de tarjeta
+        df_fbref['Y_p'] = y / df_fbref['90s'] # Promedio de amarillas puras
 
-        # B) SP1
+        # B) SP1 (Corners y Tiros)
         df_sp1 = pd.read_csv('SP1 (1).csv')
         sp1_stats = {}
         for idx, row in df_sp1.iterrows():
@@ -113,7 +120,8 @@ def calcular_predicciones(local_api, visita_api, df_fbref, sp1_stats):
         return {
             "goles": h_fb['G_p'] + a_fb['G_p'],
             "off": h_fb['O_p'] + a_fb['O_p'],
-            "cards": h_fb['C_p'] + a_fb['C_p'],
+            "cards": h_fb['C_p'] + a_fb['C_p'],   # Puntos totales
+            "yellows": h_fb['Y_p'] + a_fb['Y_p'], # Amarillas promedio
             "corn": (h_sp['corn']/h_sp['pj']) + (a_sp['corn']/a_sp['pj']),
             "sot": (h_sp['sot']/h_sp['pj']) + (a_sp['sot']/a_sp['pj'])
         }
@@ -160,7 +168,9 @@ with tab1:
             matches = get_matches('SCHEDULED')
             if matches:
                 reporte_data = []
-                telegram_buffer = "🦁 *YETIPS - REPORTE JORNADA*\n\n"
+                # Cabecera del mensaje de Telegram
+                telegram_buffer = "🦁 *YETIPS - REPORTE COMPLETO*\n"
+                telegram_buffer += f"📅 Fecha: {datetime.now().strftime('%d/%m')}\n\n"
                 
                 for m in matches[:10]:
                     local = m['homeTeam']['name']
@@ -169,24 +179,27 @@ with tab1:
                     
                     preds = calcular_predicciones(local, visita, df_fbref, sp1_stats)
                     if preds:
-                        # Datos para la tabla visual
+                        # Datos para la tabla visual (Web)
                         reporte_data.append({
                             "Fecha": fecha,
                             "Partido": f"{local} vs {visita}",
-                            "⚽ Goles": f"{preds['goles']:.2f} ({'MÁS 2.5' if preds['goles']>2.55 else 'Menos'})",
-                            "🚩 Offsides": f"{preds['off']:.2f} ({'MÁS 3.5' if preds['off']>3.6 else 'Menos'})",
-                            "⛳ Corners": f"{preds['corn']:.2f} ({'MÁS 9.5' if preds['corn']>9.5 else 'Menos'})",
-                            "🟨 Tarjetas": f"{preds['cards']:.0f} pts"
+                            "⚽ Goles": f"{preds['goles']:.2f}",
+                            "⛳ Corners": f"{preds['corn']:.2f}",
+                            "🎯 Tiros Puerta": f"{preds['sot']:.2f}",
+                            "🟨 Amarillas": f"{preds['yellows']:.2f}",
+                            "🚩 Offsides": f"{preds['off']:.2f}"
                         })
                         
-                        # Datos para el mensaje de Telegram
+                        # Datos para el mensaje de Telegram (Texto)
                         telegram_buffer += f"⚔️ *{local} vs {visita}*\n"
                         telegram_buffer += f"⚽ Goles: {preds['goles']:.2f}\n"
                         telegram_buffer += f"⛳ Corners: {preds['corn']:.2f}\n"
+                        telegram_buffer += f"🎯 Tiros Puerta: {preds['sot']:.2f}\n"
+                        telegram_buffer += f"🟨 Amarillas: {preds['yellows']:.2f}\n"
                         telegram_buffer += f"🚩 Offsides: {preds['off']:.2f}\n"
                         telegram_buffer += "------------------\n"
 
-                # Guardamos en session_state para que no se borre al pulsar otro botón
+                # Guardamos en session_state
                 st.session_state['reporte_tabla'] = pd.DataFrame(reporte_data)
                 st.session_state['reporte_telegram'] = telegram_buffer
             else:
@@ -199,8 +212,8 @@ with tab1:
         st.write("---")
         st.subheader("📱 Zona de Envío")
         
-        # Botón para enviar a Telegram
-        if st.button("✈️ Enviar Reporte a Telegram"):
+        col_envio_btn, col_envio_txt = st.columns([1,3])
+        if col_envio_btn.button("✈️ Enviar Reporte a Telegram"):
             if 'reporte_telegram' in st.session_state:
                 with st.spinner("Enviando mensaje..."):
                     exito = enviar_telegram(st.session_state['reporte_telegram'])
@@ -210,6 +223,10 @@ with tab1:
                         st.error("❌ Falló el envío. Revisa el TOKEN y el CHAT_ID.")
             else:
                 st.error("Primero analiza la jornada.")
+        
+        # Mostrar previsualización del mensaje
+        with st.expander("👁️ Ver lo que se va a enviar"):
+            st.text(st.session_state['reporte_telegram'])
 
 # --- PESTAÑA 2: AUDITORÍA ---
 with tab2:
@@ -269,4 +286,3 @@ with tab2:
                     ), use_container_width=True)
                 else:
                     st.warning("No hay datos recientes para auditar.")
-
