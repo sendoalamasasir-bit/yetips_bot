@@ -2,260 +2,282 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
-import difflib # Para coincidencia de nombres aproximada
+import difflib
 
 # ==========================================
-# 1. CONFIGURACIÓN
+# 1. CONFIGURACIÓN (TUS CLAVES)
 # ==========================================
 
-# --- TUS CLAVES ---
-try:
-    API_KEY = st.secrets["API_KEY"]
-    TG_TOKEN = st.secrets["TG_TOKEN"]
-    TG_CHAT_ID = st.secrets["TG_CHAT_ID"]
-except:
-    # CLAVES DE EJEMPLO (¡CÁMBIALAS!)
-    API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f" 
-    TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"
-    TG_CHAT_ID = "1197028422"
+API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f"
+TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"
+TG_CHAT_ID = "1197028422"
 
-# --- CONFIGURACIÓN DE LIGAS (Expandible) ---
-# 'API': Código en football-data.org
-# 'CSV': Código en football-data.co.uk
+# --- LIGAS SOPORTADAS ---
 LIGAS = {
     "🇪🇸 La Liga": {"api": "PD", "csv": "SP1"},
     "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League": {"api": "PL", "csv": "E0"},
     "🇩🇪 Bundesliga": {"api": "BL1", "csv": "D1"},
     "🇮🇹 Serie A": {"api": "SA", "csv": "I1"},
     "🇫🇷 Ligue 1": {"api": "FL1", "csv": "F1"},
-    # Puedes añadir: "🇳🇱 Eredivisie": {"api": "DED", "csv": "N1"}
+    "🇳🇱 Eredivisie": {"api": "DED", "csv": "N1"},
+    "🇵🇹 Primeira Liga": {"api": "PPL", "csv": "P1"}
 }
 
 # ==========================================
-# 2. FUNCIONES DE CARGA DE DATOS (AUTOMÁTICAS)
+# 2. FUNCIONES DE CARGA DE DATOS
 # ==========================================
 
-@st.cache_data(ttl=3600) # Se actualiza cada hora
+@st.cache_data(ttl=3600)
 def cargar_datos_liga(codigo_csv):
-    """Descarga el CSV directamente de la web oficial de estadísticas"""
+    """
+    Descarga stats automáticas (Goles, Corners, Tarjetas, Tiros)
+    TEMPORADA 25/26
+    """
+    # CAMBIO AQUÍ: 2526 para la temporada 2025/2026
     url = f"https://www.football-data.co.uk/mmz4281/2526/{codigo_csv}.csv"
     
-    # Intento de descarga para la temporada 25/26 (si ya existe)
-    # Si estamos a principios de temporada y falla, usa la 24/25 cambiando el link
-    # Nota: Como estamos en 2026, asumo temporada 25/26. Si falla, probar 2425.
     try:
         df = pd.read_csv(url)
-        # Limpieza básica
         stats = {}
         for idx, row in df.iterrows():
-            try:
-                # Acumulamos datos Local y Visitante
-                teams = [row['HomeTeam'], row['AwayTeam']]
-                for i, team in enumerate(teams):
-                    if team not in stats: 
-                        stats[team] = {'pj': 0, 'goles': 0, 'corn': 0, 'sot': 0, 'cards': 0}
-                    
-                    es_local = (i == 0)
-                    stats[team]['pj'] += 1
-                    
-                    # Goles
-                    stats[team]['goles'] += row['FTHG'] if es_local else row['FTAG']
-                    # Corners (HC = Home Corners, AC = Away Corners)
-                    if pd.notna(row['HC']): stats[team]['corn'] += row['HC'] if es_local else row['AC']
-                    # Tiros Puerta (HST / AST)
-                    if pd.notna(row['HST']): stats[team]['sot'] += row['HST'] if es_local else row['AST']
-                    # Amarillas (HY / AY)
-                    if pd.notna(row['HY']): stats[team]['cards'] += row['HY'] if es_local else row['AY']
-            except:
-                continue
+            # Acumulamos datos Local y Visitante
+            for tipo in ['Home', 'Away']:
+                team = row[f'{tipo}Team']
+                if team not in stats: 
+                    stats[team] = {'pj': 0, 'gf': 0, 'gc': 0, 'corn': 0, 'sot': 0}
+                
+                es_local = (tipo == 'Home')
+                stats[team]['pj'] += 1
+                stats[team]['gf'] += row['FTHG'] if es_local else row['FTAG']
+                stats[team]['gc'] += row['FTAG'] if es_local else row['FTHG']
+                
+                # Corners y Tiros (verificamos que la columna exista)
+                if 'HC' in row and pd.notna(row['HC']): 
+                    c = row['HC'] if es_local else row['AC']
+                    stats[team]['corn'] += c
+                if 'HST' in row and pd.notna(row['HST']):
+                    s = row['HST'] if es_local else row['AST']
+                    stats[team]['sot'] += s
         return stats
     except Exception as e:
-        st.error(f"Error descargando datos de {url}: {e}")
+        st.error(f"No se pudieron descargar los datos de la 25/26 ({url}). Asegúrate de que la liga ya haya empezado. Error: {e}")
         return None
 
-def get_matches(api_code, status='SCHEDULED'):
-    headers = {'X-Auth-Token': API_KEY}
-    url = f"https://api.football-data.org/v4/competitions/{api_code}/matches"
-    
-    params = {'status': status}
-    if status == 'FINISHED':
-        hoy = datetime.now()
-        hace_mes = hoy - timedelta(days=30)
-        params['dateFrom'] = hace_mes.strftime('%Y-%m-%d')
-        params['dateTo'] = hoy.strftime('%Y-%m-%d')
-
-    response = requests.get(url, headers=headers, params=params)
-    return response.json()['matches'] if response.status_code == 200 else []
-
-def encontrar_equipo_stats(nombre_api, stats_dict):
-    """
-    Usa 'difflib' para encontrar el nombre más parecido en el CSV 
-    dado el nombre que nos da la API. Magia pura.
-    """
-    nombres_csv = list(stats_dict.keys())
-    # Busca la coincidencia más cercana (cutoff 0.6 significa 60% de similitud mínima)
-    coincidencias = difflib.get_close_matches(nombre_api, nombres_csv, n=1, cutoff=0.5)
-    
-    if coincidencias:
-        return coincidencias[0]
-    
-    # Correcciones manuales comunes si falla el automático
-    mapa_manual = {
-        "Brighton & Hove Albion FC": "Brighton",
-        "West Ham United FC": "West Ham",
-        "Tottenham Hotspur FC": "Tottenham",
-        "Wolverhampton Wanderers FC": "Wolves",
-        "Paris Saint-Germain FC": "Paris SG",
-        "FC Bayern München": "Bayern Munich",
-        "Bayer 04 Leverkusen": "Leverkusen",
-        "Inter Milan": "Inter",
-        "AC Milan": "Milan",
-        "Club Atlético de Madrid": "Ath Madrid",
-        "Athletic Club": "Ath Bilbao"
-    }
-    return mapa_manual.get(nombre_api, None)
-
-def calcular_predicciones(local_api, visita_api, stats_dict):
-    # 1. Traducir nombres API -> CSV
-    nom_L = encontrar_equipo_stats(local_api, stats_dict)
-    nom_V = encontrar_equipo_stats(visita_api, stats_dict)
-    
-    if not nom_L or not nom_V: return None # No encontramos los datos
-
+def cargar_offsides_manual(uploaded_file):
+    """Procesa el CSV manual de FBref para fueras de juego"""
+    if uploaded_file is None: return None
     try:
-        sL = stats_dict[nom_L]
-        sV = stats_dict[nom_V]
+        try:
+            df = pd.read_csv(uploaded_file, header=1)
+            if 'Squad' not in df.columns: 
+                df = pd.read_csv(uploaded_file, header=0)
+        except:
+            return None
+
+        off_stats = {}
+        required = ['Squad', '90s', 'Off']
         
-        # Promedios Simples (Total Global / Partidos Jugados)
-        # Nota: Para hacerlo más preciso, podrías separar Local/Visita en el futuro
-        def prom(k): return (sL[k]/sL['pj']) + (sV[k]/sV['pj'])
-
-        return {
-            "goles": prom('goles'), # Suma de promedios de gol (revisar lógica según necesidad)
-            "corn": prom('corn'),
-            "sot": prom('sot'),
-            "cards": prom('cards')
-        }
-    except:
+        if all(col in df.columns for col in required):
+            for _, row in df.iterrows():
+                try:
+                    squad = row['Squad']
+                    partidos = float(row['90s'])
+                    total_off = float(row['Off'])
+                    if partidos > 0:
+                        off_stats[squad] = total_off / partidos
+                except: continue
+            return off_stats
+        else:
+            st.warning("El CSV manual no tiene las columnas 'Squad', '90s' y 'Off'.")
+            return None
+    except Exception as e:
+        st.error(f"Error leyendo CSV manual: {e}")
         return None
 
-def obtener_pick(valor, linea):
-    emoji = "🟢" if valor > linea else "🔴"
-    texto = "MÁS" if valor > linea else "MENOS"
-    return f"{emoji} {texto} {linea} ({valor:.2f})"
+# ==========================================
+# 3. LÓGICA DE CÁLCULO
+# ==========================================
 
-def enviar_telegram(mensaje):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    data = {"chat_id": TG_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
+def encontrar_equipo(nombre_api, lista_nombres):
+    """Busca el nombre más parecido en una lista"""
+    match = difflib.get_close_matches(nombre_api, lista_nombres, n=1, cutoff=0.5)
+    
+    manual = {
+        "Athletic Club": "Ath Bilbao", "Club Atlético de Madrid": "Ath Madrid",
+        "Manchester United FC": "Man United", "Wolverhampton Wanderers FC": "Wolves",
+        "Paris Saint-Germain FC": "Paris SG", "Bayer 04 Leverkusen": "Leverkusen",
+        "Real Betis Balompié": "Betis", "Rayo Vallecano de Madrid": "Rayo Vallecano",
+        "Girona FC": "Girona", "Real Sociedad de Fútbol": "Sociedad",
+        "RCD Mallorca": "Mallorca", "CA Osasuna": "Osasuna",
+        "Sevilla FC": "Sevilla", "Valencia CF": "Valencia",
+        "Villarreal CF": "Villarreal"
+    }
+    
+    if nombre_api in manual:
+        if manual[nombre_api] in lista_nombres: return manual[nombre_api]
+        match_manual = difflib.get_close_matches(manual[nombre_api], lista_nombres, n=1, cutoff=0.6)
+        if match_manual: return match_manual[0]
+
+    return match[0] if match else None
+
+def calcular_todo(local_api, visita_api, stats_auto, stats_off):
+    nom_auto_L = encontrar_equipo(local_api, list(stats_auto.keys()))
+    nom_auto_V = encontrar_equipo(visita_api, list(stats_auto.keys()))
+    
+    if not nom_auto_L or not nom_auto_V: return None
+
+    L = stats_auto[nom_auto_L]
+    V = stats_auto[nom_auto_V]
+    
+    # Offsides
+    off_avg = "N/A"
+    if stats_off:
+        nom_off_L = encontrar_equipo(local_api, list(stats_off.keys()))
+        nom_off_V = encontrar_equipo(visita_api, list(stats_off.keys()))
+        if nom_off_L and nom_off_V:
+            off_val = stats_off[nom_off_L] + stats_off[nom_off_V]
+            off_avg = round(off_val, 2)
+
+    # xG Simplificado
+    xg_h = (L['gf']/L['pj'] + V['gc']/V['pj']) / 2
+    xg_a = (V['gf']/V['pj'] + L['gc']/L['pj']) / 2
+    total_goals = xg_h + xg_a
+    
+    # Ganador
+    diff = xg_h - xg_a
+    if diff > 0.4: ganador = f"Gana {local_api}"
+    elif diff < -0.4: ganador = f"Gana {visita_api}"
+    else: ganador = "Empate / Reñido"
+    
+    # Handicap
+    raw_h = round((diff * -1) * 2) / 2
+    handicap = f"{'+' if raw_h > 0 else ''}{raw_h}"
+
+    return {
+        "ganador": ganador,
+        "marcador": f"{round(xg_h)}-{round(xg_a)}",
+        "handicap": handicap,
+        "goles": total_goals,
+        "corn": (L['corn']/L['pj'] + V['corn']/V['pj']),
+        "sot": (L['sot']/L['pj'] + V['sot']/V['pj']),
+        "offsides": off_avg
+    }
+
+def get_matches(api_code):
+    headers = {'X-Auth-Token': API_KEY}
+    url = f"https://api.football-data.org/v4/competitions/{api_code}/matches?status=SCHEDULED"
     try:
-        requests.post(url, data=data)
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            return r.json()['matches']
+        else:
+            st.error(f"Error API ({r.status_code}): Verifica tu suscripción.")
+            return []
+    except:
+        return []
+
+def enviar_telegram(msg):
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    try:
+        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
         return True
     except:
         return False
 
 # ==========================================
-# 3. INTERFAZ GRÁFICA MULTI-LIGA
+# 4. INTERFAZ GRÁFICA
 # ==========================================
 
-st.set_page_config(page_title="EuroTips Dashboard", layout="wide", page_icon="🌍")
+st.set_page_config(page_title="Yetips Pro 25/26", layout="wide", page_icon="🦁")
+st.title("🦁 Yetips Pro: Temporada 25/26")
 
-st.title("🌍 EuroTips Pro Dashboard")
+# --- SIDEBAR ---
+st.sidebar.header("⚙️ Configuración")
+liga = st.sidebar.selectbox("Selecciona la Liga", list(LIGAS.keys()))
 
-# --- SELECTOR DE LIGA (SIDEBAR) ---
-st.sidebar.header("Configuración")
-liga_seleccionada = st.sidebar.selectbox("Selecciona Liga", list(LIGAS.keys()))
-codigos = LIGAS[liga_seleccionada]
+st.sidebar.markdown("---")
+st.sidebar.write("📂 **Fueras de Juego (Opcional)**")
+st.sidebar.info("Sube 'misc.csv' de FBref (Temporada 25/26) para Offsides.")
+off_file = st.sidebar.file_uploader("Subir CSV de Offsides", type=['csv'])
 
-# Cargamos stats AUTOMÁTICAMENTE desde la URL
-with st.spinner(f"Descargando estadísticas de {liga_seleccionada}..."):
-    stats_dict = cargar_datos_liga(codigos['csv'])
+# --- CARGA DE DATOS ---
+codigos = LIGAS[liga]
+with st.spinner(f"Descargando datos 25/26 de {liga}..."):
+    stats_auto = cargar_datos_liga(codigos['csv'])
+    stats_off = cargar_offsides_manual(off_file) if off_file else None
 
-if stats_dict is None:
-    st.error("No se pudieron descargar los datos. Verifica la temporada en la URL.")
-    st.stop()
+if stats_auto:
+    st.sidebar.success(f"✅ Datos 25/26: OK")
+else:
+    st.sidebar.error("❌ Error descargando. Revisa si la liga tiene datos en football-data.co.uk para la 25/26.")
 
-# --- PESTAÑAS PRINCIPALES ---
-tab1, tab2 = st.tabs(["🔮 Pronósticos", "✅ Auditoría"])
+if stats_off: st.sidebar.success("✅ Offsides: OK")
 
-# --- TAB 1: PRONÓSTICOS ---
-with tab1:
-    col_btn, _ = st.columns([1, 4])
-    if col_btn.button("🔄 Analizar Partidos", type="primary"):
-        with st.spinner("Consultando calendario y cruzando datos..."):
-            matches = get_matches(codigos['api'], 'SCHEDULED')
-            
-            if matches:
-                reporte_data = []
-                tg_msg = f"🌍 *YETIPS - {liga_seleccionada.upper()}*\n\n"
-                
-                for m in matches[:10]: # Top 10 partidos próximos
-                    local_api = m['homeTeam']['name']
-                    visita_api = m['awayTeam']['name']
-                    
-                    preds = calcular_predicciones(local_api, visita_api, stats_dict)
-                    
-                    if preds:
-                        # Ajustar lógica de Goles: En CSV 'FTHG' es goles totales del equipo.
-                        # Aquí hacemos (Prom Gol L + Prom Gol V). Para Over 2.5 suele funcionar.
-                        p_gol = obtener_pick(preds['goles'], 2.5)
-                        p_corn = obtener_pick(preds['corn'], 9.5)
-                        p_card = obtener_pick(preds['cards'], 4.5)
-                        
-                        reporte_data.append({
-                            "Partido": f"{local_api} vs {visita_api}",
-                            "⚽ Goles": p_gol,
-                            "⛳ Corners": p_corn,
-                            "🟨 Amarillas": p_card
-                        })
-                        
-                        tg_msg += f"⚔️ *{local_api} vs {visita_api}*\n"
-                        tg_msg += f"⚽ {p_gol}\n⛳ {p_corn}\n🟨 {p_card}\n---\n"
-                
-                if reporte_data:
-                    st.session_state['data_multi'] = pd.DataFrame(reporte_data)
-                    st.session_state['tg_multi'] = tg_msg
-                else:
-                    st.warning("No se pudieron calcular predicciones (posible error de nombres).")
-            else:
-                st.warning("No hay partidos programados pronto para esta liga.")
+# --- BOTÓN DE ANÁLISIS ---
+st.divider()
 
-    if 'data_multi' in st.session_state:
-        st.dataframe(st.session_state['data_multi'], use_container_width=True)
-        if st.button("✈️ Enviar a Telegram"):
-            enviar_telegram(st.session_state['tg_multi'])
-            st.success("Enviado")
-
-# --- TAB 2: AUDITORÍA ---
-with tab2:
-    if st.button("📊 Verificar Aciertos (30 días)"):
-        matches = get_matches(codigos['api'], 'FINISHED')
+if st.button(f"🔍 ANALIZAR PARTIDOS DE {liga.upper()}", type="primary"):
+    if not stats_auto:
+        st.error("Faltan datos automáticos.")
+        st.stop()
+        
+    with st.spinner("Analizando..."):
+        matches = get_matches(codigos['api'])
+        
         if matches:
-            audit = []
-            aciertos = 0
-            for m in matches:
-                try:
-                    goles_real = m['score']['fullTime']['home'] + m['score']['fullTime']['away']
-                    local, visita = m['homeTeam']['name'], m['awayTeam']['name']
-                    
-                    preds = calcular_predicciones(local, visita, stats_dict)
-                    if preds:
-                        est = preds['goles']
-                        pick = "MÁS" if est > 2.5 else "MENOS"
-                        # Lógica simple de verificación Over/Under 2.5
-                        ganada = (pick == "MÁS" and goles_real > 2.5) or (pick == "MENOS" and goles_real < 2.5)
-                        if ganada: aciertos += 1
-                        
-                        audit.append({
-                            "Partido": f"{local} vs {visita}",
-                            "Real": goles_real,
-                            "Pred": f"{est:.2f} ({pick})",
-                            "Res": "✅" if ganada else "❌"
-                        })
-                except: continue
+            res_table = []
+            tg_msg = f"🦁 *YETIPS PRO - {liga.upper()} (25/26)*\n"
+            tg_msg += f"📅 {datetime.now().strftime('%d/%m/%Y')}\n\n"
             
-            df = pd.DataFrame(audit)
-            if not df.empty:
-                st.metric("Win Rate Goles", f"{(aciertos/len(df)*100):.1f}%")
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.warning("Sin datos suficientes.")
+            count = 0
+            for m in matches:
+                if count >= 10: break # Limite 10 partidos
+                
+                local = m['homeTeam']['name']
+                visita = m['awayTeam']['name']
+                
+                d = calcular_todo(local, visita, stats_auto, stats_off)
+                
+                if d:
+                    count += 1
+                    tg_msg += f"⚔️ *{local} vs {visita}*\n"
+                    tg_msg += f"🏆 {d['ganador']} (AH {d['handicap']})\n"
+                    tg_msg += f"🔢 Marcador: {d['marcador']}\n"
+                    
+                    icon_gol = "🟢" if d['goles'] > 2.5 else "🔴"
+                    tg_msg += f"⚽ Goles: {icon_gol} {d['goles']:.2f}\n"
+                    
+                    icon_corn = "🟢" if d['corn'] > 9.5 else "🔴"
+                    tg_msg += f"⛳ Corners: {icon_corn} {d['corn']:.2f}\n"
+                    
+                    tg_msg += f"🎯 Tiros: {d['sot']:.2f}\n"
+                    
+                    if d['offsides'] != "N/A":
+                        off_pick = "MÁS 3.5" if d['offsides'] > 3.5 else "MENOS 3.5"
+                        tg_msg += f"🚩 Offsides: {d['offsides']} ({off_pick})\n"
+                        # Actualizar para tabla
+                        d['off_txt'] = f"{d['offsides']} ({off_pick})"
+                    else:
+                        d['off_txt'] = "N/A"
+                    
+                    tg_msg += "------------------\n"
+                    
+                    res_table.append({
+                        "Partido": f"{local} vs {visita}",
+                        "Ganador": d['ganador'],
+                        "AH": d['handicap'],
+                        "Marcador": d['marcador'],
+                        "Goles": f"{d['goles']:.2f}",
+                        "Corners": f"{d['corn']:.2f}",
+                        "Tiros": f"{d['sot']:.2f}",
+                        "Offsides": d['off_txt']
+                    })
+
+            # Mostrar Resultados
+            st.dataframe(pd.DataFrame(res_table), use_container_width=True)
+            
+            if st.button("Enviar Telegram"):
+                if enviar_telegram(tg_msg): st.success("Enviado ✈️")
+                else: st.error("Error Telegram")
+        else:
+            st.warning("No hay partidos programados.")
