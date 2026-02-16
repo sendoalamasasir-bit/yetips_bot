@@ -5,14 +5,13 @@ from datetime import datetime, timedelta
 import difflib
 
 # ==========================================
-# 1. CONFIGURACIÓN (TUS CLAVES)
+# 1. CONFIGURACIÓN
 # ==========================================
 
 API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f"
 TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"
 TG_CHAT_ID = "1197028422"
 
-# --- LIGAS SOPORTADAS ---
 LIGAS = {
     "🇪🇸 La Liga": {"api": "PD", "csv": "SP1"},
     "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League": {"api": "PL", "csv": "E0"},
@@ -24,23 +23,17 @@ LIGAS = {
 }
 
 # ==========================================
-# 2. FUNCIONES DE CARGA DE DATOS
+# 2. FUNCIONES DE DATOS
 # ==========================================
 
 @st.cache_data(ttl=3600)
 def cargar_datos_liga(codigo_csv):
-    """
-    Descarga stats automáticas (Goles, Corners, Tarjetas, Tiros)
-    TEMPORADA 25/26
-    """
-    # CAMBIO AQUÍ: 2526 para la temporada 2025/2026
+    """Descarga stats 25/26"""
     url = f"https://www.football-data.co.uk/mmz4281/2526/{codigo_csv}.csv"
-    
     try:
         df = pd.read_csv(url)
         stats = {}
         for idx, row in df.iterrows():
-            # Acumulamos datos Local y Visitante
             for tipo in ['Home', 'Away']:
                 team = row[f'{tipo}Team']
                 if team not in stats: 
@@ -51,7 +44,6 @@ def cargar_datos_liga(codigo_csv):
                 stats[team]['gf'] += row['FTHG'] if es_local else row['FTAG']
                 stats[team]['gc'] += row['FTAG'] if es_local else row['FTHG']
                 
-                # Corners y Tiros (verificamos que la columna exista)
                 if 'HC' in row and pd.notna(row['HC']): 
                     c = row['HC'] if es_local else row['AC']
                     stats[team]['corn'] += c
@@ -59,49 +51,34 @@ def cargar_datos_liga(codigo_csv):
                     s = row['HST'] if es_local else row['AST']
                     stats[team]['sot'] += s
         return stats
-    except Exception as e:
-        st.error(f"No se pudieron descargar los datos de la 25/26 ({url}). Asegúrate de que la liga ya haya empezado. Error: {e}")
-        return None
+    except: return None
 
 def cargar_offsides_manual(uploaded_file):
-    """Procesa el CSV manual de FBref para fueras de juego"""
     if uploaded_file is None: return None
     try:
-        try:
-            df = pd.read_csv(uploaded_file, header=1)
-            if 'Squad' not in df.columns: 
-                df = pd.read_csv(uploaded_file, header=0)
-        except:
-            return None
-
-        off_stats = {}
-        required = ['Squad', '90s', 'Off']
+        try: df = pd.read_csv(uploaded_file, header=1)
+        except: df = pd.read_csv(uploaded_file, header=0)
         
-        if all(col in df.columns for col in required):
+        off_stats = {}
+        if 'Squad' in df.columns and 'Off' in df.columns:
             for _, row in df.iterrows():
                 try:
                     squad = row['Squad']
-                    partidos = float(row['90s'])
-                    total_off = float(row['Off'])
-                    if partidos > 0:
-                        off_stats[squad] = total_off / partidos
+                    # Si '90s' no existe, usamos pj=1 para normalizar (o buscar columna MP)
+                    pj = float(row['90s']) if '90s' in df.columns else 1
+                    off = float(row['Off'])
+                    if pj > 0: off_stats[squad] = off / pj
                 except: continue
             return off_stats
-        else:
-            st.warning("El CSV manual no tiene las columnas 'Squad', '90s' y 'Off'.")
-            return None
-    except Exception as e:
-        st.error(f"Error leyendo CSV manual: {e}")
         return None
+    except: return None
 
 # ==========================================
-# 3. LÓGICA DE CÁLCULO
+# 3. MOTORES DE CÁLCULO
 # ==========================================
 
 def encontrar_equipo(nombre_api, lista_nombres):
-    """Busca el nombre más parecido en una lista"""
     match = difflib.get_close_matches(nombre_api, lista_nombres, n=1, cutoff=0.5)
-    
     manual = {
         "Athletic Club": "Ath Bilbao", "Club Atlético de Madrid": "Ath Madrid",
         "Manchester United FC": "Man United", "Wolverhampton Wanderers FC": "Wolves",
@@ -109,175 +86,208 @@ def encontrar_equipo(nombre_api, lista_nombres):
         "Real Betis Balompié": "Betis", "Rayo Vallecano de Madrid": "Rayo Vallecano",
         "Girona FC": "Girona", "Real Sociedad de Fútbol": "Sociedad",
         "RCD Mallorca": "Mallorca", "CA Osasuna": "Osasuna",
-        "Sevilla FC": "Sevilla", "Valencia CF": "Valencia",
-        "Villarreal CF": "Villarreal"
+        "Sevilla FC": "Sevilla", "Valencia CF": "Valencia", "Villarreal CF": "Villarreal",
+        "Inter Milan": "Inter", "AC Milan": "Milan"
     }
-    
     if nombre_api in manual:
         if manual[nombre_api] in lista_nombres: return manual[nombre_api]
         match_manual = difflib.get_close_matches(manual[nombre_api], lista_nombres, n=1, cutoff=0.6)
         if match_manual: return match_manual[0]
-
     return match[0] if match else None
 
-def calcular_todo(local_api, visita_api, stats_auto, stats_off):
-    nom_auto_L = encontrar_equipo(local_api, list(stats_auto.keys()))
-    nom_auto_V = encontrar_equipo(visita_api, list(stats_auto.keys()))
+def calcular_pronostico(local, visita, stats_auto, stats_off=None):
+    nom_L = encontrar_equipo(local, list(stats_auto.keys()))
+    nom_V = encontrar_equipo(visita, list(stats_auto.keys()))
     
-    if not nom_auto_L or not nom_auto_V: return None
+    if not nom_L or not nom_V: return None
 
-    L = stats_auto[nom_auto_L]
-    V = stats_auto[nom_auto_V]
-    
-    # Offsides
-    off_avg = "N/A"
-    if stats_off:
-        nom_off_L = encontrar_equipo(local_api, list(stats_off.keys()))
-        nom_off_V = encontrar_equipo(visita_api, list(stats_off.keys()))
-        if nom_off_L and nom_off_V:
-            off_val = stats_off[nom_off_L] + stats_off[nom_off_V]
-            off_avg = round(off_val, 2)
+    L = stats_auto[nom_L]
+    V = stats_auto[nom_V]
 
-    # xG Simplificado
+    # --- xG y Ganador ---
     xg_h = (L['gf']/L['pj'] + V['gc']/V['pj']) / 2
     xg_a = (V['gf']/V['pj'] + L['gc']/L['pj']) / 2
     total_goals = xg_h + xg_a
     
-    # Ganador
     diff = xg_h - xg_a
-    if diff > 0.4: ganador = f"Gana {local_api}"
-    elif diff < -0.4: ganador = f"Gana {visita_api}"
-    else: ganador = "Empate / Reñido"
+    if diff > 0.4: ganador = f"Local ({local})"
+    elif diff < -0.4: ganador = f"Visita ({visita})"
+    else: ganador = "Empate"
+
+    # --- Strings Más/Menos ---
+    pick_gol = "MÁS 2.5" if total_goals > 2.5 else "MENOS 2.5"
     
-    # Handicap
-    raw_h = round((diff * -1) * 2) / 2
-    handicap = f"{'+' if raw_h > 0 else ''}{raw_h}"
+    corn_val = (L['corn']/L['pj'] + V['corn']/V['pj'])
+    pick_corn = "MÁS 9.5" if corn_val > 9.5 else "MENOS 9.5"
+
+    # --- Offsides ---
+    off_val = 0
+    pick_off = "N/A"
+    if stats_off:
+        nL = encontrar_equipo(local, list(stats_off.keys()))
+        nV = encontrar_equipo(visita, list(stats_off.keys()))
+        if nL and nV:
+            off_val = stats_off[nL] + stats_off[nV]
+            pick_off = f"{'MÁS' if off_val > 3.5 else 'MENOS'} 3.5 ({off_val:.2f})"
 
     return {
         "ganador": ganador,
-        "marcador": f"{round(xg_h)}-{round(xg_a)}",
-        "handicap": handicap,
-        "goles": total_goals,
-        "corn": (L['corn']/L['pj'] + V['corn']/V['pj']),
-        "sot": (L['sot']/L['pj'] + V['sot']/V['pj']),
-        "offsides": off_avg
+        "goles_val": total_goals,
+        "goles_pick": pick_gol,
+        "corn_val": corn_val,
+        "corn_pick": pick_corn,
+        "off_pick": pick_off,
+        "score_est": f"{round(xg_h)}-{round(xg_a)}"
     }
 
-def get_matches(api_code):
+# ==========================================
+# 4. AUDITORÍA (BACKTESTING)
+# ==========================================
+
+def ejecutar_auditoria(api_code, stats_auto):
     headers = {'X-Auth-Token': API_KEY}
-    url = f"https://api.football-data.org/v4/competitions/{api_code}/matches?status=SCHEDULED"
-    try:
-        r = requests.get(url, headers=headers)
-        if r.status_code == 200:
-            return r.json()['matches']
-        else:
-            st.error(f"Error API ({r.status_code}): Verifica tu suscripción.")
-            return []
-    except:
-        return []
-
-def enviar_telegram(msg):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-        return True
-    except:
-        return False
+    
+    # Rango: Últimos 30 días
+    hoy = datetime.now()
+    inicio = hoy - timedelta(days=30)
+    
+    url = f"https://api.football-data.org/v4/competitions/{api_code}/matches"
+    params = {
+        'status': 'FINISHED',
+        'dateFrom': inicio.strftime('%Y-%m-%d'),
+        'dateTo': hoy.strftime('%Y-%m-%d')
+    }
+    
+    r = requests.get(url, headers=headers, params=params)
+    if r.status_code != 200: return []
+    
+    matches = r.json()['matches']
+    resultados = []
+    
+    aciertos = 0
+    total = 0
+    
+    for m in matches:
+        local = m['homeTeam']['name']
+        visita = m['awayTeam']['name']
+        
+        # Resultado Real
+        goles_real = m['score']['fullTime']['home'] + m['score']['fullTime']['away']
+        
+        # Predicción
+        pred = calcular_pronostico(local, visita, stats_auto)
+        
+        if pred:
+            pick = pred['goles_pick'] # "MÁS 2.5" o "MENOS 2.5"
+            
+            # Verificar si acertamos
+            gano = False
+            if "MÁS" in pick and goles_real > 2.5: gano = True
+            elif "MENOS" in pick and goles_real < 2.5: gano = True
+            
+            if gano: aciertos += 1
+            total += 1
+            
+            resultados.append({
+                "Partido": f"{local} vs {visita}",
+                "Predicción": f"{pick} (Est: {pred['goles_val']:.1f})",
+                "Realidad": f"{goles_real} Goles",
+                "Resultado": "✅ ACIERTO" if gano else "❌ FALLO"
+            })
+            
+    return pd.DataFrame(resultados), aciertos, total
 
 # ==========================================
-# 4. INTERFAZ GRÁFICA
+# 5. INTERFAZ GRÁFICA
 # ==========================================
 
-st.set_page_config(page_title="Yetips Pro 25/26", layout="wide", page_icon="🦁")
-st.title("🦁 Yetips Pro: Temporada 25/26")
+st.set_page_config(page_title="Yetips Ultimate", layout="wide", page_icon="🦁")
+st.title("🦁 Yetips Ultimate: Predicción + Auditoría")
 
 # --- SIDEBAR ---
 st.sidebar.header("⚙️ Configuración")
-liga = st.sidebar.selectbox("Selecciona la Liga", list(LIGAS.keys()))
+liga_sel = st.sidebar.selectbox("Liga", list(LIGAS.keys()))
+codigos = LIGAS[liga_sel]
 
 st.sidebar.markdown("---")
-st.sidebar.write("📂 **Fueras de Juego (Opcional)**")
-st.sidebar.info("Sube 'misc.csv' de FBref (Temporada 25/26) para Offsides.")
-off_file = st.sidebar.file_uploader("Subir CSV de Offsides", type=['csv'])
+off_file = st.sidebar.file_uploader("📂 Offsides (FBref CSV)", type=['csv'])
 
-# --- CARGA DE DATOS ---
-codigos = LIGAS[liga]
-with st.spinner(f"Descargando datos 25/26 de {liga}..."):
-    stats_auto = cargar_datos_liga(codigos['csv'])
-    stats_off = cargar_offsides_manual(off_file) if off_file else None
+# Carga de datos
+stats_auto = cargar_datos_liga(codigos['csv'])
+stats_off = cargar_offsides_manual(off_file)
 
-if stats_auto:
-    st.sidebar.success(f"✅ Datos 25/26: OK")
-else:
-    st.sidebar.error("❌ Error descargando. Revisa si la liga tiene datos en football-data.co.uk para la 25/26.")
+if not stats_auto:
+    st.error("Error cargando datos. Verifica conexión.")
+    st.stop()
 
-if stats_off: st.sidebar.success("✅ Offsides: OK")
+# --- PESTAÑAS PRINCIPALES ---
+tab1, tab2 = st.tabs(["🔮 PRONÓSTICOS FUTUROS", "✅ AUDITORÍA (30 DÍAS)"])
 
-# --- BOTÓN DE ANÁLISIS ---
-st.divider()
-
-if st.button(f"🔍 ANALIZAR PARTIDOS DE {liga.upper()}", type="primary"):
-    if not stats_auto:
-        st.error("Faltan datos automáticos.")
-        st.stop()
+# --- TAB 1: PRONÓSTICOS ---
+with tab1:
+    if st.button("🔄 Analizar Próximos Partidos", type="primary"):
+        url = f"https://api.football-data.org/v4/competitions/{codigos['api']}/matches?status=SCHEDULED"
+        headers = {'X-Auth-Token': API_KEY}
+        r = requests.get(url, headers=headers)
         
-    with st.spinner("Analizando..."):
-        matches = get_matches(codigos['api'])
-        
-        if matches:
-            res_table = []
-            tg_msg = f"🦁 *YETIPS PRO - {liga.upper()} (25/26)*\n"
-            tg_msg += f"📅 {datetime.now().strftime('%d/%m/%Y')}\n\n"
-            
-            count = 0
-            for m in matches:
-                if count >= 10: break # Limite 10 partidos
+        if r.status_code == 200:
+            matches = r.json()['matches']
+            if matches:
+                tg_msg = f"🦁 *YETIPS - {liga_sel.upper()}*\n\n"
+                table_data = []
                 
-                local = m['homeTeam']['name']
-                visita = m['awayTeam']['name']
+                for m in matches[:12]:
+                    local, visita = m['homeTeam']['name'], m['awayTeam']['name']
+                    d = calcular_pronostico(local, visita, stats_auto, stats_off)
+                    
+                    if d:
+                        # Iconos
+                        ig = "🟢" if "MÁS" in d['goles_pick'] else "🔴"
+                        ic = "🟢" if "MÁS" in d['corn_pick'] else "🔴"
+                        
+                        tg_msg += f"⚔️ *{local} vs {visita}*\n"
+                        tg_msg += f"🏆 {d['ganador']} | 🔢 {d['score_est']}\n"
+                        tg_msg += f"⚽ {ig} {d['goles_pick']} ({d['goles_val']:.2f})\n"
+                        tg_msg += f"⛳ {ic} {d['corn_pick']} ({d['corn_val']:.2f})\n"
+                        if d['off_pick'] != "N/A":
+                            tg_msg += f"🚩 Offsides: {d['off_pick']}\n"
+                        tg_msg += "---\n"
+                        
+                        table_data.append({
+                            "Partido": f"{local} vs {visita}",
+                            "Ganador": d['ganador'],
+                            "Goles": f"{d['goles_pick']} ({d['goles_val']:.1f})",
+                            "Corners": f"{d['corn_pick']} ({d['corn_val']:.1f})",
+                            "Offsides": d['off_pick']
+                        })
                 
-                d = calcular_todo(local, visita, stats_auto, stats_off)
-                
-                if d:
-                    count += 1
-                    tg_msg += f"⚔️ *{local} vs {visita}*\n"
-                    tg_msg += f"🏆 {d['ganador']} (AH {d['handicap']})\n"
-                    tg_msg += f"🔢 Marcador: {d['marcador']}\n"
-                    
-                    icon_gol = "🟢" if d['goles'] > 2.5 else "🔴"
-                    tg_msg += f"⚽ Goles: {icon_gol} {d['goles']:.2f}\n"
-                    
-                    icon_corn = "🟢" if d['corn'] > 9.5 else "🔴"
-                    tg_msg += f"⛳ Corners: {icon_corn} {d['corn']:.2f}\n"
-                    
-                    tg_msg += f"🎯 Tiros: {d['sot']:.2f}\n"
-                    
-                    if d['offsides'] != "N/A":
-                        off_pick = "MÁS 3.5" if d['offsides'] > 3.5 else "MENOS 3.5"
-                        tg_msg += f"🚩 Offsides: {d['offsides']} ({off_pick})\n"
-                        # Actualizar para tabla
-                        d['off_txt'] = f"{d['offsides']} ({off_pick})"
-                    else:
-                        d['off_txt'] = "N/A"
-                    
-                    tg_msg += "------------------\n"
-                    
-                    res_table.append({
-                        "Partido": f"{local} vs {visita}",
-                        "Ganador": d['ganador'],
-                        "AH": d['handicap'],
-                        "Marcador": d['marcador'],
-                        "Goles": f"{d['goles']:.2f}",
-                        "Corners": f"{d['corn']:.2f}",
-                        "Tiros": f"{d['sot']:.2f}",
-                        "Offsides": d['off_txt']
-                    })
+                st.dataframe(pd.DataFrame(table_data), use_container_width=True)
+                if st.button("Enviar a Telegram"):
+                    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
+                                  data={"chat_id": TG_CHAT_ID, "text": tg_msg, "parse_mode": "Markdown"})
+                    st.success("Enviado.")
+            else:
+                st.info("No hay partidos programados pronto.")
 
-            # Mostrar Resultados
-            st.dataframe(pd.DataFrame(res_table), use_container_width=True)
+# --- TAB 2: AUDITORÍA ---
+with tab2:
+    st.write("Verifica cómo habría funcionado el bot en los últimos 30 días.")
+    if st.button("📊 Ejecutar Auditoría"):
+        with st.spinner("Descargando resultados pasados y verificando..."):
+            df_audit, wins, total = ejecutar_auditoria(codigos['api'], stats_auto)
             
-            if st.button("Enviar Telegram"):
-                if enviar_telegram(tg_msg): st.success("Enviado ✈️")
-                else: st.error("Error Telegram")
-        else:
-            st.warning("No hay partidos programados.")
+            if total > 0:
+                rate = (wins / total) * 100
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Partidos Analizados", total)
+                col2.metric("Aciertos (Goles 2.5)", wins)
+                col3.metric("Win Rate", f"{rate:.1f}%")
+                
+                # Colorear la tabla
+                def color_row(row):
+                    color = '#d4edda' if row['Resultado'] == "✅ ACIERTO" else '#f8d7da'
+                    return [f'background-color: {color}'] * len(row)
+
+                st.dataframe(df_audit.style.apply(color_row, axis=1), use_container_width=True)
+            else:
+                st.warning("No se encontraron partidos finalizados en los últimos 30 días o hubo un error de conexión.")
