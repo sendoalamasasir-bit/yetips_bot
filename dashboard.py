@@ -12,15 +12,15 @@ from datetime import datetime, timedelta
 try:
     API_KEY = st.secrets["API_KEY"]
 except:
-    API_KEY = "TU_API_KEY_DE_FOOTBALL_DATA" # <--- ¡PEGALA AQUÍ!
+    API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f" # <--- ¡PEGALA AQUÍ!
 
 # --- TELEGRAM CONFIG ---
 try:
-    TG_TOKEN = st.secrets["TG_TOKEN"]
-    TG_CHAT_ID = st.secrets["TG_CHAT_ID"]
+    TG_TOKEN = st.secrets["8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"]
+    TG_CHAT_ID = st.secrets["1197028422"]
 except:
-    TG_TOKEN = "TU_TOKEN_DEL_BOTFATHER"     # <--- ¡PEGALO AQUÍ!
-    TG_CHAT_ID = "TU_ID_NUMERICO_DE_USER"   # <--- ¡PEGALO AQUÍ!
+    TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"     # <--- ¡PEGALO AQUÍ!
+    TG_CHAT_ID = "1197028422"   # <--- ¡PEGALO AQUÍ!
 
 # --- CONFIGURACIÓN DE LA LIGA ---
 COMPETITION_ID = 'PD' # Primera División
@@ -269,3 +269,4 @@ with tab2:
                     ), use_container_width=True)
                 else:
                     st.warning("No hay datos recientes para auditar.")
+
