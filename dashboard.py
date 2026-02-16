@@ -3,15 +3,27 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
-# --- CONFIGURACIÓN ---
-# Si lo ejecutas en local, pon tu clave aquí abajo. 
-# Si está en Streamlit Cloud, usa st.secrets["API_KEY"]
+# ==========================================
+# 1. CONFIGURACIÓN (LAS LLAVES DEL REINO)
+# ==========================================
+
+# --- API FOOTBALL DATA ---
+# Si usas Streamlit Cloud, usa st.secrets. Si es local, pon tu clave directa.
 try:
     API_KEY = st.secrets["API_KEY"]
 except:
-    API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f" # <--- ¡PON TU TOKEN AQUI SI ESTAS EN LOCAL!
+    API_KEY = "TU_API_KEY_DE_FOOTBALL_DATA" # <--- ¡PEGALA AQUÍ!
 
-COMPETITION_ID = 'PD' # La Liga
+# --- TELEGRAM CONFIG ---
+try:
+    TG_TOKEN = st.secrets["TG_TOKEN"]
+    TG_CHAT_ID = st.secrets["TG_CHAT_ID"]
+except:
+    TG_TOKEN = "TU_TOKEN_DEL_BOTFATHER"     # <--- ¡PEGALO AQUÍ!
+    TG_CHAT_ID = "TU_ID_NUMERICO_DE_USER"   # <--- ¡PEGALO AQUÍ!
+
+# --- CONFIGURACIÓN DE LA LIGA ---
+COMPETITION_ID = 'PD' # Primera División
 URL_API = f"https://api.football-data.org/v4/competitions/{COMPETITION_ID}/matches"
 
 # --- MAPA DE NOMBRES ---
@@ -30,16 +42,33 @@ mapa_nombres = {
     "CD Leganés": ["Leganés", "Leganes"]
 }
 
-# --- FUNCIONES DE CÁLCULO ---
+# ==========================================
+# 2. FUNCIONES (EL CEREBRO)
+# ==========================================
+
 def clean_num(val):
     if isinstance(val, str): return float(val.replace(',', '.'))
     return float(val) if val else 0.0
 
+def enviar_telegram(mensaje):
+    """Envía un mensaje de texto a tu bot"""
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    data = {"chat_id": TG_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
+    try:
+        r = requests.post(url, data=data)
+        if r.status_code == 200:
+            return True
+        else:
+            st.error(f"Error Telegram: {r.text}")
+            return False
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+        return False
+
 @st.cache_data
 def cargar_bases_datos():
-    """Carga y procesa los CSVs una sola vez para que sea rápido"""
     try:
-        # A) FBref (Goles, Offsides, Tarjetas)
+        # A) FBref
         df_goals = pd.read_csv('liga_stand_25 - Hoja 1.csv', header=1)[['Squad', '90s', 'Gls']]
         df_misc = pd.read_csv('misc25sp - Hoja 1.csv', header=1)[['Squad', 'Off', 'CrdY', 'CrdR']]
         df_fbref = df_goals.merge(df_misc, on='Squad', how='inner')
@@ -51,7 +80,7 @@ def cargar_bases_datos():
         r = df_fbref['CrdR'].apply(clean_num)
         df_fbref['C_p'] = ((y * 10) + (r * 25)) / df_fbref['90s']
 
-        # B) SP1 (Corners, Tiros)
+        # B) SP1
         df_sp1 = pd.read_csv('SP1 (1).csv')
         sp1_stats = {}
         for idx, row in df_sp1.iterrows():
@@ -67,7 +96,6 @@ def cargar_bases_datos():
         return None, None
 
 def calcular_predicciones(local_api, visita_api, df_fbref, sp1_stats):
-    """Calcula los números basado en los nombres de la API"""
     names_L = mapa_nombres.get(local_api)
     names_V = mapa_nombres.get(visita_api)
     
@@ -77,11 +105,8 @@ def calcular_predicciones(local_api, visita_api, df_fbref, sp1_stats):
     nom_fb_V, nom_sp1_V = names_V
     
     try:
-        # FBref Data
         h_fb = df_fbref[df_fbref['Squad'] == nom_fb_L].iloc[0]
         a_fb = df_fbref[df_fbref['Squad'] == nom_fb_V].iloc[0]
-        
-        # SP1 Data
         h_sp = sp1_stats.get(nom_sp1_L, {'pj':1, 'corn':0, 'sot':0})
         a_sp = sp1_stats.get(nom_sp1_V, {'pj':1, 'corn':0, 'sot':0})
         
@@ -95,13 +120,9 @@ def calcular_predicciones(local_api, visita_api, df_fbref, sp1_stats):
     except:
         return None
 
-# --- CONEXIÓN API ---
 def get_matches(status='SCHEDULED'):
     headers = {'X-Auth-Token': API_KEY}
-    # Pedimos partidos programados o finalizados
-    # Si pedimos finished, necesitamos un rango de fechas (últimos 30 días)
     params = {'status': status}
-    
     if status == 'FINISHED':
         hoy = datetime.now()
         hace_mes = hoy - timedelta(days=30)
@@ -113,37 +134,43 @@ def get_matches(status='SCHEDULED'):
         return response.json()['matches']
     return []
 
-# --- INTERFAZ ---
+# ==========================================
+# 3. INTERFAZ GRÁFICA (LO QUE VES)
+# ==========================================
+
 st.set_page_config(page_title="Yetips Dashboard 2.0", layout="wide", page_icon="🦁")
 
-# Cargar datos una sola vez
 df_fbref, sp1_stats = cargar_bases_datos()
 
 if df_fbref is None:
-    st.error("❌ Error cargando CSVs. Verifica que están en la carpeta.")
+    st.error("❌ Error: No encuentro los archivos CSV (liga_stand_25, misc25sp, SP1). Súbelos a la carpeta.")
     st.stop()
 
 st.title("🦁 Yetips Dashboard 2.0")
-st.markdown("**Sistema de Inteligencia Deportiva: Predicción & Validación**")
 
-# Pestañas
-tab1, tab2 = st.tabs(["🔮 Próximos Partidos", "✅ Historial y Aciertos"])
+tab1, tab2 = st.tabs(["🔮 Próximos Partidos & Telegram", "✅ Historial de Aciertos"])
 
-# --- PESTAÑA 1: FUTURO ---
+# --- PESTAÑA 1: PREDICCIONES Y ENVÍO ---
 with tab1:
-    if st.button("🔄 Analizar Jornada Actual"):
-        with st.spinner("Conectando con La Liga..."):
+    col_btn, col_info = st.columns([1, 4])
+    
+    # Botón principal de análisis
+    if col_btn.button("🔄 Analizar Jornada", type="primary"):
+        with st.spinner("Consultando API y calculando..."):
             matches = get_matches('SCHEDULED')
             if matches:
-                reporte = []
-                for m in matches[:10]: # Solo mostramos los 10 primeros
+                reporte_data = []
+                telegram_buffer = "🦁 *YETIPS - REPORTE JORNADA*\n\n"
+                
+                for m in matches[:10]:
                     local = m['homeTeam']['name']
                     visita = m['awayTeam']['name']
                     fecha = m['utcDate'][:10]
                     
                     preds = calcular_predicciones(local, visita, df_fbref, sp1_stats)
                     if preds:
-                        reporte.append({
+                        # Datos para la tabla visual
+                        reporte_data.append({
                             "Fecha": fecha,
                             "Partido": f"{local} vs {visita}",
                             "⚽ Goles": f"{preds['goles']:.2f} ({'MÁS 2.5' if preds['goles']>2.55 else 'Menos'})",
@@ -151,15 +178,44 @@ with tab1:
                             "⛳ Corners": f"{preds['corn']:.2f} ({'MÁS 9.5' if preds['corn']>9.5 else 'Menos'})",
                             "🟨 Tarjetas": f"{preds['cards']:.0f} pts"
                         })
-                st.dataframe(pd.DataFrame(reporte), use_container_width=True)
-            else:
-                st.warning("No hay partidos programados pronto.")
+                        
+                        # Datos para el mensaje de Telegram
+                        telegram_buffer += f"⚔️ *{local} vs {visita}*\n"
+                        telegram_buffer += f"⚽ Goles: {preds['goles']:.2f}\n"
+                        telegram_buffer += f"⛳ Corners: {preds['corn']:.2f}\n"
+                        telegram_buffer += f"🚩 Offsides: {preds['off']:.2f}\n"
+                        telegram_buffer += "------------------\n"
 
-# --- PESTAÑA 2: PASADO (VERIFICACIÓN) ---
+                # Guardamos en session_state para que no se borre al pulsar otro botón
+                st.session_state['reporte_tabla'] = pd.DataFrame(reporte_data)
+                st.session_state['reporte_telegram'] = telegram_buffer
+            else:
+                st.warning("No hay partidos programados en la API para los próximos días.")
+
+    # Mostrar resultados si existen en memoria
+    if 'reporte_tabla' in st.session_state:
+        st.dataframe(st.session_state['reporte_tabla'], use_container_width=True)
+        
+        st.write("---")
+        st.subheader("📱 Zona de Envío")
+        
+        # Botón para enviar a Telegram
+        if st.button("✈️ Enviar Reporte a Telegram"):
+            if 'reporte_telegram' in st.session_state:
+                with st.spinner("Enviando mensaje..."):
+                    exito = enviar_telegram(st.session_state['reporte_telegram'])
+                    if exito:
+                        st.success("✅ ¡Reporte enviado a tu móvil!")
+                    else:
+                        st.error("❌ Falló el envío. Revisa el TOKEN y el CHAT_ID.")
+            else:
+                st.error("Primero analiza la jornada.")
+
+# --- PESTAÑA 2: AUDITORÍA ---
 with tab2:
-    st.info("ℹ️ Validando automáticamente Goles (La API gratuita no da datos históricos de Córners/Tarjetas).")
+    st.info("ℹ️ Validación automática de GOLES (Últimos 30 días)")
     
-    if st.button("📊 Verificar Aciertos (Últimos 30 días)"):
+    if st.button("📊 Verificar Aciertos"):
         with st.spinner("Auditando resultados..."):
             matches = get_matches('FINISHED')
             if matches:
@@ -171,23 +227,20 @@ with tab2:
                     local = m['homeTeam']['name']
                     visita = m['awayTeam']['name']
                     
-                    # Resultado REAL
                     try:
                         g_real_h = m['score']['fullTime']['home']
                         g_real_a = m['score']['fullTime']['away']
-                        if g_real_h is None: continue # Partido cancelado o sin datos
+                        if g_real_h is None: continue 
                         total_goles_real = g_real_h + g_real_a
                     except:
                         continue
 
-                    # Nuestra Predicción
                     preds = calcular_predicciones(local, visita, df_fbref, sp1_stats)
                     
                     if preds:
                         pred_val = preds['goles']
                         pick = "MÁS 2.5" if pred_val > 2.55 else "MENOS 2.5"
                         
-                        # VEREDICTO
                         ganada = False
                         if pick == "MÁS 2.5" and total_goles_real > 2.5: ganada = True
                         elif pick == "MENOS 2.5" and total_goles_real < 2.5: ganada = True
@@ -202,19 +255,17 @@ with tab2:
                             "Estado": "✅ ACIERTO" if ganada else "❌ FALLO"
                         })
                 
-                # MOSTRAR METRICAS
                 if total_audit > 0:
                     win_rate = (aciertos / total_audit) * 100
-                    col_m1, col_m2, col_m3 = st.columns(3)
-                    col_m1.metric("Partidos Analizados", total_audit)
-                    col_m2.metric("Aciertos", aciertos)
-                    col_m3.metric("Win Rate", f"{win_rate:.1f}%")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Partidos", total_audit)
+                    c2.metric("Aciertos", aciertos)
+                    c3.metric("Win Rate", f"{win_rate:.1f}%")
                     
-                    # Colorear tabla
                     df_audit = pd.DataFrame(audit_data)
                     st.dataframe(df_audit.style.applymap(
                         lambda x: 'color: green' if 'ACIERTO' in str(x) else ('color: red' if 'FALLO' in str(x) else ''), 
                         subset=['Estado']
                     ), use_container_width=True)
                 else:
-                    st.warning("No se encontraron partidos finalizados con datos.")
+                    st.warning("No hay datos recientes para auditar.")
