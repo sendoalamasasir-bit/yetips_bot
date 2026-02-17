@@ -1,21 +1,31 @@
 import streamlit as st
 import pandas as pd
 import requests
+import math
 from datetime import datetime, timedelta
 import difflib
 
 # ==========================================
-# 1. CONFIGURACIÓN
+# 1. CONFIGURACIÓN Y ESTILOS
 # ==========================================
-st.set_page_config(page_title="Yetips Champions", layout="wide", page_icon="🏆")
+st.set_page_config(page_title="Yetips IA Ultimate", layout="wide", page_icon="🧠")
 
-# INICIALIZAR MEMORIA (Session State)
-if 'datos_analisis' not in st.session_state:
-    st.session_state.datos_analisis = None
-if 'mensaje_telegram' not in st.session_state:
-    st.session_state.mensaje_telegram = ""
+# Estilos CSS Dark Mode Pro
+st.markdown("""
+    <style>
+    .main {background-color: #0e1117;}
+    .stMetric {background-color: #1f2937; padding: 15px; border-radius: 10px; border: 1px solid #374151;}
+    h1, h2, h3 {color: #ffd700;}
+    .stDataFrame {border: 1px solid #374151;}
+    </style>
+    """, unsafe_allow_html=True)
 
-# TUS CLAVES
+# --- INICIALIZAR MEMORIA (Session State) ---
+if 'datos_ia' not in st.session_state: st.session_state.datos_ia = None
+if 'datos_clasico' not in st.session_state: st.session_state.datos_clasico = None
+if 'mensaje_telegram' not in st.session_state: st.session_state.mensaje_telegram = ""
+
+# --- TUS CLAVES (NO BORRAR) ---
 API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f"
 TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"
 TG_CHAT_ID = "1197028422"
@@ -32,8 +42,47 @@ LIGAS = {
 }
 
 # ==========================================
-# 2. FUNCIONES DE CARGA Y CÁLCULO
+# 2. MOTOR MATEMÁTICO (IA POISSON) 🧠
 # ==========================================
+
+def calcular_poisson(esperado, k):
+    """Probabilidad de ocurrencia de k eventos dado un promedio esperado"""
+    return (math.exp(-esperado) * (esperado ** k)) / math.factorial(k)
+
+def simular_probabilidad_over(xg_total, linea):
+    """Calcula % REAL de superar una línea usando Poisson"""
+    prob_under = 0
+    # Sumamos prob de 0, 1... hasta linea (inclusivo para el under)
+    # Ej: Para Over 2.5, sumamos 0, 1, 2. La inversa es la probabilidad de > 2.5
+    for k in range(int(math.floor(linea)) + 1): 
+        prob_under += calcular_poisson(xg_total, k)
+    return max(0, min(100, (1 - prob_under) * 100))
+
+def determinar_linea_gol_inteligente(xg):
+    """Lógica difusa para determinar el tipo de partido"""
+    if xg >= 3.60: return "MÁS 3.0/3.5", "🔥 PARTIDO DE GOLPES", 3.5
+    elif xg >= 2.90: return "MÁS 2.5/3.0", "✅ TENDENCIA OVER", 2.5
+    elif xg >= 2.55: return "MÁS 2.5 (Justo)", "⚠️ OVER AJUSTADO", 2.5
+    elif xg <= 1.90: return "MENOS 2.5", "🧊 PARTIDO CERRADO", 2.5
+    elif xg <= 2.30: return "MENOS 3.0", "🛡️ DEFENSA FUERTE", 3.0
+    else: return "NO BET (Rango 2-3)", "⚖️ EQUILIBRADO", 2.5
+
+def determinar_ganador_handicap(xg_h, xg_a, local, visita):
+    """Calcula AH basado en diferencia de poder (xG diff)"""
+    diff = xg_h - xg_a
+    abs_diff = abs(diff)
+    lado = local if diff > 0 else visita
+    
+    if abs_diff >= 1.5: return f"GANA {lado} (-1.5 AH)", 5
+    elif abs_diff >= 1.0: return f"GANA {lado} (-1.0 AH)", 4
+    elif abs_diff >= 0.6: return f"GANA {lado} (-0.5 Directo)", 3
+    elif abs_diff >= 0.2: return f"{lado} (DNB / Sin Empate)", 2
+    else: return "EMPATE / DOBLE OPORTUNIDAD", 1
+
+# ==========================================
+# 3. CARGA DE DATOS Y UTILIDADES
+# ==========================================
+
 @st.cache_data(ttl=3600)
 def cargar_datos_liga(codigo_csv):
     if codigo_csv == "MULTI":
@@ -59,10 +108,7 @@ def cargar_datos_liga(codigo_csv):
                 stats[team]['gc'] += row['FTAG'] if es_local else row['FTHG']
                 if 'HC' in row and pd.notna(row['HC']): 
                     stats[team]['corn'] += row['HC'] if es_local else row['AC']
-                if 'HST' in row and pd.notna(row['HST']):
-                    stats[team]['sot'] += row['HST'] if es_local else row['AST']
-                if 'HY' in row and pd.notna(row['HY']):
-                    stats[team]['cards'] += (row['HY'] if es_local else row['AY'])
+    
         return stats
     except: return None
 
@@ -97,7 +143,8 @@ def encontrar_equipo(nombre_api, lista_nombres):
         "Bayer 04 Leverkusen": "Leverkusen", "Real Betis Balompié": "Betis", 
         "Inter Milan": "Inter", "AC Milan": "Milan", "FC Barcelona": "Barcelona", 
         "FC Bayern München": "Bayern Munich", "Lille OSC": "Lille", 
-        "Aston Villa FC": "Aston Villa", "RB Leipzig": "Leipzig"
+        "Aston Villa FC": "Aston Villa", "RB Leipzig": "Leipzig",
+        "Arsenal FC": "Arsenal", "Liverpool FC": "Liverpool", "Manchester City FC": "Man City"
     }
     if nombre_api in manual:
         nombre_csv = manual[nombre_api]
@@ -107,140 +154,195 @@ def encontrar_equipo(nombre_api, lista_nombres):
     match = difflib.get_close_matches(nombre_api, lista_nombres, n=1, cutoff=0.5)
     return match[0] if match else None
 
-def calcular_pronostico(local, visita, stats_auto, stats_off=None):
+# ==========================================
+# 4. LÓGICA DE PRONÓSTICO (HÍBRIDA)
+# ==========================================
+
+def analizar_partido(local, visita, stats_auto, stats_off, manual_data):
+    # Recuperar datos base
     nom_L = encontrar_equipo(local, list(stats_auto.keys()))
     nom_V = encontrar_equipo(visita, list(stats_auto.keys()))
     if not nom_L or not nom_V: return None
 
     L, V = stats_auto[nom_L], stats_auto[nom_V]
     
-    # AJUSTE FACTOR CAMPO (Para evitar empates repetidos)
-    xg_h = (L['gf']/L['pj'] + V['gc']/V['pj']) / 2 * 1.10 # +10% Local
-    xg_a = (V['gf']/V['pj'] + L['gc']/L['pj']) / 2
-    total_goals = xg_h + xg_a
-    pick_gol = "MÁS 2.5" if total_goals > 2.5 else "MENOS 2.5"
+    # --- MÉTRICAS PER 90 (BASE PARA IA) ---
+    gf_90_L = L['gf']/L['pj']
+    ga_90_L = L['gc']/L['pj']
+    gf_90_V = V['gf']/V['pj']
+    ga_90_V = V['gc']/V['pj']
     
-    diff = xg_h - xg_a
-    if diff > 0.25: ganador = f"{local}"
-    elif diff < -0.25: ganador = f"{visita}"
-    else: ganador = "Empate / X"
+    # 1. CÁLCULO xG (PROMEDIO CRUZADO)
+    xg_h = (gf_90_L + ga_90_V) / 2 * 1.05 # +5% Factor Local
+    xg_a = (gf_90_V + ga_90_L) / 2
+    
+    # 2. LABORATORIO MANUAL (Sobrescritura)
+    if manual_data and manual_data['usar']:
+        xg_h = (xg_h + manual_data['g_h']) / 2
+        xg_a = (xg_a + manual_data['g_a']) / 2
 
-    ah_raw = round(diff * 2) / 2
-    if ah_raw > 0: ah_line = f"{local} -{abs(ah_raw)}"
-    elif ah_raw < 0: ah_line = f"{visita} -{abs(ah_raw)}"
-    else: ah_line = "DNB 0.0"
-
+    xg_total = xg_h + xg_a
+    
+    # --- CÁLCULOS IA POISSON ---
+    pick_gol_txt, etiqueta_gol, linea_ref = determinar_linea_gol_inteligente(xg_total)
+    prob_exito = simular_probabilidad_over(xg_total, 2.5) # Prob base Over 2.5
+    
+    ganador_ia, stake_ia = determinar_ganador_handicap(xg_h, xg_a, local, visita)
+    
+    # --- CÁLCULOS CLÁSICOS (PARA COMPARAR) ---
     corn_val = (L['corn']/L['pj'] + V['corn']/V['pj'])
-    pick_corn = "MÁS 9.5" if corn_val > 9.5 else "MENOS 9.5"
+    if manual_data and manual_data['usar']: corn_val = manual_data['corn']
     
-    sot_val = (L['sot']/L['pj'] + V['sot']/V['pj'])
-    pick_sot = "MÁS 8.5" if sot_val > 8.5 else "MENOS 8.5"
-    
-    cards_val = (L['cards']/L['pj'] + V['cards']/V['pj'])
-    pick_cards = "MÁS 4.5" if cards_val > 4.5 else "MENOS 4.5"
-
     off_val = 0
     pick_off = "N/A"
     if stats_off:
-        nL = encontrar_equipo(local, list(stats_off.keys()))
-        nV = encontrar_equipo(visita, list(stats_off.keys()))
-        if nL and nV:
-            off_val = stats_off[nL] + stats_off[nV]
+        nL_off = encontrar_equipo(local, list(stats_off.keys()))
+        nV_off = encontrar_equipo(visita, list(stats_off.keys()))
+        if nL_off and nV_off:
+            off_val = stats_off[nL_off] + stats_off[nV_off]
             pick_off = f"{'MÁS' if off_val > 3.5 else 'MENOS'} 3.5"
 
     return {
-        "ganador": ganador, "ah": ah_line, "goles_val": total_goals, "goles_pick": pick_gol,
-        "corn_val": corn_val, "corn_pick": pick_corn, "sot_val": sot_val, "sot_pick": pick_sot,
-        "cards_val": cards_val, "cards_pick": pick_cards, "off_val": off_val, "off_pick": pick_off
+        "equipo_L": local, "equipo_V": visita,
+        "xg_h": xg_h, "xg_a": xg_a, "xg_total": xg_total,
+        # IA Output
+        "ia_pick_gol": pick_gol_txt, "ia_tag": etiqueta_gol,
+        "ia_prob": prob_exito, "ia_ganador": ganador_ia,
+        # Clásico Output
+        "corn_val": corn_val, "off_pick": pick_off
     }
 
 # ==========================================
-# 3. INTERFAZ Y LÓGICA PRINCIPAL
+# 5. INTERFAZ Y DASHBOARD
 # ==========================================
-st.title("🦁 YETIPS: CHAMPIONS LEAGUE EDITION 🏆")
+
+st.title("🧠 YETIPS: IA + MATEMÁTICAS 🦁")
 st.markdown("---")
 
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("🎛️ Panel de Mando")
-    liga_sel = st.selectbox("Selecciona Competición", list(LIGAS.keys()))
-    off_file = st.file_uploader("CSV Offsides", type=['csv'])
+    st.header("🎛️ Configuración")
+    liga_sel = st.selectbox("Competición", list(LIGAS.keys()))
+    off_file = st.file_uploader("CSV Offsides (FBref)", type=['csv'])
+    
+    with st.expander("🧪 LABORATORIO (Ajuste Manual)"):
+        st.caption("Sobrescribe los datos del algoritmo")
+        man_h_g = st.number_input("Goles Local", 1.5, step=0.1)
+        man_a_g = st.number_input("Goles Visita", 1.0, step=0.1)
+        man_corn = st.slider("Corners Esperados", 5.0, 15.0, 9.5)
+        usar_manual = st.checkbox("✅ ACTIVAR DATOS MANUALES")
+        
+    manual_data = {'usar': usar_manual, 'g_h': man_h_g, 'g_a': man_a_g, 'corn': man_corn}
 
 codigos = LIGAS[liga_sel]
 stats_auto = cargar_datos_liga(codigos['csv'])
 stats_off = cargar_offsides_manual(off_file)
 
 if not stats_auto:
-    st.error("Error cargando datos.")
+    st.error("⚠️ Error cargando base de datos. Intenta más tarde.")
     st.stop()
 
 # --- BOTÓN DE ANÁLISIS ---
-if st.button(f"🚀 ANALIZAR {liga_sel}", type="primary", use_container_width=True):
-    with st.spinner("🧠 Procesando Inteligencia Artificial..."):
+if st.button(f"🚀 ANALIZAR {liga_sel} CON IA", type="primary", use_container_width=True):
+    with st.spinner("🤖 La IA está simulando los partidos con Poisson..."):
         url = f"https://api.football-data.org/v4/competitions/{codigos['api']}/matches?status=SCHEDULED"
         headers = {'X-Auth-Token': API_KEY}
         r = requests.get(url, headers=headers)
         
         if r.status_code == 200:
             matches = r.json()['matches']
-            if matches:
-                # CREAMOS EL MENSAJE EN HTML (MÁS SEGURO)
-                tg_msg = f"🦁 <b>YETIPS - {liga_sel.upper()}</b>\n"
-                tg_msg += f"📅 {datetime.now().strftime('%d/%m')}\n\n"
-                data_display = []
+            prox_matches = [m for m in matches if datetime.strptime(m['utcDate'][:10], "%Y-%m-%d") <= datetime.now() + timedelta(days=14)]
+            
+            if prox_matches:
+                data_ia = []
+                data_clasico = []
+                tg_msg = f"🦁 <b>YETIPS IA PRO - {liga_sel}</b>\n📅 {datetime.now().strftime('%d/%m')}\n\n"
                 
-                prox_matches = [m for m in matches if datetime.strptime(m['utcDate'][:10], "%Y-%m-%d") <= datetime.now() + timedelta(days=14)]
-
                 for m in prox_matches:
-                    local, visita = m['homeTeam']['name'], m['awayTeam']['name']
-                    d = calcular_pronostico(local, visita, stats_auto, stats_off)
+                    loc, vis = m['homeTeam']['name'], m['awayTeam']['name']
+                    res = analizar_partido(loc, vis, stats_auto, stats_off, manual_data)
                     
-                    if d:
-                        tg_msg += f"🏆 <b>{local} vs {visita}</b>\n"
-                        tg_msg += f"💎 Pick: {d['ganador']}\n"
-                        tg_msg += f"⚖️ AH: {d['ah']}\n"
-                        i_gol = "🟢" if "MÁS" in d['goles_pick'] else "🔴"
-                        tg_msg += f"⚽ Goles: {i_gol} {d['goles_pick']} ({d['goles_val']:.2f})\n"
-                        i_corn = "⛳" if "MÁS" in d['corn_pick'] else "📉"
-                        tg_msg += f"⛳ Corners: {i_corn} {d['corn_pick']} ({d['corn_val']:.2f})\n"
-                        if d['off_pick'] != "N/A": tg_msg += f"🚩 Offsides: {d['off_pick']}\n"
+                    if res:
+                        # LOGICA TELEGRAM (Usamos la IA porque es mejor)
+                        icon_prob = "🟢" if res['ia_prob'] > 58 else ("🟡" if res['ia_prob'] > 50 else "🔴")
+                        tg_msg += f"🏆 <b>{loc} vs {vis}</b>\n"
+                        tg_msg += f"🧠 IA: {res['ia_pick_gol']} ({res['ia_prob']:.1f}%)\n"
+                        tg_msg += f"🏷️ Tipo: {res['ia_tag']} {icon_prob}\n"
+                        tg_msg += f"💎 Pick: {res['ia_ganador']}\n"
+                        tg_msg += f"⛳ Corners: {'MÁS' if res['corn_val']>9.5 else 'MENOS'} 9.5 ({res['corn_val']:.1f})\n"
+                        if res['off_pick'] != "N/A": tg_msg += f"🚩 Offsides: {res['off_pick']}\n"
                         tg_msg += "➖➖➖➖➖➖➖➖\n"
 
-                        data_display.append({
-                            "Partido": f"{local} vs {visita}",
-                            "Ganador": d['ganador'],
-                            "Hándicap": d['ah'],
-                            "Goles": f"{d['goles_pick']} ({d['goles_val']:.1f})",
-                            "Corners": f"{d['corn_pick']} ({d['corn_val']:.1f})",
-                            "Tiros": f"{d['sot_pick']}",
-                            "Tarjetas": f"{d['cards_pick']}",
-                            "Offsides": d['off_pick']
+                        # DATA IA
+                        data_ia.append({
+                            "Partido": f"{loc} vs {vis}",
+                            "xG Total": f"{res['xg_total']:.2f}",
+                            "Pronóstico Gol": res['ia_pick_gol'],
+                            "Probabilidad": f"{res['ia_prob']:.1f}%",
+                            "Etiqueta": res['ia_tag'],
+                            "Ganador/AH": res['ia_ganador']
                         })
-                
-                # GUARDAMOS EN SESSION STATE (ESTO ES LA CLAVE)
-                st.session_state.datos_analisis = pd.DataFrame(data_display)
+                        
+                        # DATA CLASICA
+                        data_clasico.append({
+                            "Partido": f"{loc} vs {vis}",
+                            "Goles Esperados": f"{res['xg_total']:.2f}",
+                            "Corners Esp": f"{res['corn_val']:.1f}",
+                            "Offsides": res['off_pick']
+                        })
+
+                st.session_state.datos_ia = pd.DataFrame(data_ia)
+                st.session_state.datos_clasico = pd.DataFrame(data_clasico)
                 st.session_state.mensaje_telegram = tg_msg
             else:
-                st.warning("No hay partidos programados.")
+                st.warning("No hay partidos próximos programados.")
         else:
-            st.error("Error conectando con API Football.")
+            st.error(f"Error API: {r.status_code}")
 
-# --- MOSTRAR RESULTADOS (FUERA DEL IF DEL BOTÓN) ---
-if st.session_state.datos_analisis is not None:
-    st.dataframe(st.session_state.datos_analisis, use_container_width=True)
+# --- VISUALIZACIÓN DE RESULTADOS ---
+if st.session_state.datos_ia is not None:
     
-    # --- BOTÓN DE TELEGRAM (AHORA SÍ FUNCIONA) ---
-    if st.button("📲 ENVIAR REPORTE A TELEGRAM"):
-        payload = {
-            "chat_id": TG_CHAT_ID, 
-            "text": st.session_state.mensaje_telegram, 
-            "parse_mode": "HTML"
-        }
-        try:
-            req = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=payload)
-            if req.status_code == 200:
-                st.success("✅ ¡Mensaje enviado con éxito!")
-                st.balloons()
-            else:
-                st.error(f"❌ Error Telegram: {req.text}")
-        except Exception as e:
-            st.error(f"⚠️ Error Conexión: {e}")
+    tab_ia, tab_clasico, tab_audit = st.tabs(["🤖 PREDICCIONES IA (POISSON)", "📊 MÉTODO CLÁSICO", "📝 AUDITORÍA"])
+    
+    with tab_ia:
+        st.subheader("Resultados del Motor Matemático")
+        st.caption("Este modelo utiliza la distribución de Poisson para calcular probabilidades reales.")
+        st.dataframe(st.session_state.datos_ia, use_container_width=True, hide_index=True)
+        
+    with tab_clasico:
+        st.subheader("Estadísticas Promedio Simple")
+        st.dataframe(st.session_state.datos_clasico, use_container_width=True, hide_index=True)
+        
+    with tab_audit:
+        st.subheader("📁 Auditoría y Exportación")
+        st.write("Historial de análisis generado en esta sesión.")
+        if st.session_state.datos_ia is not None:
+            # Convertir a CSV para descargar
+            csv = st.session_state.datos_ia.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Descargar Pronósticos en Excel/CSV",
+                data=csv,
+                file_name='pronosticos_ia.csv',
+                mime='text/csv',
+            )
+            st.info("Guarda este archivo para verificar los aciertos mañana.")
+
+    # --- BOTÓN TELEGRAM (FUERA DE LAS TABS) ---
+    st.markdown("---")
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        if st.button("📲 ENVIAR REPORTE IA A TELEGRAM"):
+            payload = {
+                "chat_id": TG_CHAT_ID, 
+                "text": st.session_state.mensaje_telegram, 
+                "parse_mode": "HTML"
+            }
+            try:
+                req = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=payload)
+                if req.status_code == 200:
+                    st.success("✅ ¡Reporte enviado!")
+                    st.balloons()
+                else:
+                    st.error(f"❌ Error Telegram: {req.text}")
+            except Exception as e:
+                st.error(f"⚠️ Error Conexión: {e}")
