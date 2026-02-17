@@ -287,12 +287,27 @@ with tab1:
 
                     if data_display:
                         st.dataframe(pd.DataFrame(data_display), use_container_width=True)
-                        if st.button("Enviar Telegram"):
-                            requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
-                                          data={"chat_id": TG_CHAT_ID, "text": tg_msg, "parse_mode": "Markdown"})
-                            st.success("Enviado.")
+                       if st.button("📲 ENVIAR REPORTE A TELEGRAM"):
+    # 1. Intentamos enviar
+    url_tg = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = {"chat_id": TG_CHAT_ID, "text": tg_msg, "parse_mode": "Markdown"}
+    
+    try:
+        r = requests.post(url_tg, data=payload)
+        
+        # 2. Verificamos si Telegram dijo OK (Código 200)
+        if r.status_code == 200:
+            st.success("✅ ¡Mensaje enviado correctamente!")
+            st.balloons() # Un efecto visual para confirmar
+        else:
+            # 3. Si falla, mostramos el error técnico en pantalla
+            st.error(f"❌ Error al enviar. Telegram dice: {r.text}")
+            
+    except Exception as e:
+        st.error(f"⚠️ Error de conexión: {e}")
                 else:
                     st.warning("No hay partidos programados.")
 
 with tab2:
     st.write("📊 Auditoría de resultados pasados.")
+
