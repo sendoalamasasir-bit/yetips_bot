@@ -18,6 +18,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# TUS CLAVES
 API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f"
 TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"
 TG_CHAT_ID = "1197028422"
@@ -34,14 +35,13 @@ LIGAS = {
 }
 
 # ==========================================
-# 2. CARGA DE DATOS (CHAMPIONS FIX)
+# 2. CARGA DE DATOS
 # ==========================================
 
 @st.cache_data(ttl=3600)
 def cargar_datos_liga(codigo_csv):
     # MODO CHAMPIONS: Carga TODAS las ligas
     if codigo_csv == "MULTI":
-        # SP1=España, E0=Inglaterra, D1=Alemania, I1=Italia, F1=Francia, N1=Holanda, P1=Portugal
         todos_codigos = ["SP1", "E0", "D1", "I1", "F1", "N1", "P1"]
         mega_stats = {}
         for c in todos_codigos:
@@ -97,18 +97,15 @@ def cargar_offsides_manual(uploaded_file):
     except: return None
 
 # ==========================================
-# 3. LÓGICA DE NOMBRES (AQUÍ ESTABA EL ERROR)
+# 3. LÓGICA DE NOMBRES Y CÁLCULOS
 # ==========================================
 
 def encontrar_equipo(nombre_api, lista_nombres):
-    # 1. DICCIONARIO MANUAL DE CORRECCIONES (ACTUALIZADO)
     manual = {
-        # --- CHAMPIONS FIX ---
-        "Sport Lisboa e Benfica": "Benfica",    # <--- CORREGIDO
-        "Real Madrid CF": "Real Madrid",        # <--- CORREGIDO
+        "Sport Lisboa e Benfica": "Benfica",
+        "Real Madrid CF": "Real Madrid",
         "Sporting Clube de Portugal": "Sp Portugal",
-        "PSV Eindhoven": "PSV Eindhoven",       # A veces viene como PSV
-        # --- OTROS ---
+        "PSV Eindhoven": "PSV Eindhoven",
         "Athletic Club": "Ath Bilbao", 
         "Club Atlético de Madrid": "Ath Madrid",
         "Manchester United FC": "Man United", 
@@ -133,17 +130,12 @@ def encontrar_equipo(nombre_api, lista_nombres):
         "RB Leipzig": "Leipzig"
     }
     
-    # 2. Búsqueda directa en diccionario
     if nombre_api in manual:
         nombre_csv = manual[nombre_api]
-        # Verificamos si esa traducción existe realmente en la base de datos
-        if nombre_csv in lista_nombres: 
-            return nombre_csv
-        # Si no, intentamos buscar algo parecido a la traducción
+        if nombre_csv in lista_nombres: return nombre_csv
         match_manual = difflib.get_close_matches(nombre_csv, lista_nombres, n=1, cutoff=0.6)
         if match_manual: return match_manual[0]
 
-    # 3. Búsqueda difusa estándar (si no está en manual)
     match = difflib.get_close_matches(nombre_api, lista_nombres, n=1, cutoff=0.5)
     return match[0] if match else None
 
@@ -151,7 +143,7 @@ def calcular_pronostico(local, visita, stats_auto, stats_off=None):
     nom_L = encontrar_equipo(local, list(stats_auto.keys()))
     nom_V = encontrar_equipo(visita, list(stats_auto.keys()))
     
-    if not nom_L or not nom_V: return None # Si falla uno, no calcula
+    if not nom_L or not nom_V: return None
 
     L = stats_auto[nom_L]
     V = stats_auto[nom_V]
@@ -163,7 +155,6 @@ def calcular_pronostico(local, visita, stats_auto, stats_off=None):
     pick_gol = "MÁS 2.5" if total_goals > 2.5 else "MENOS 2.5"
     
     diff = xg_h - xg_a
-    # Factor local reducido para Champions (campo neutral/finales o alta calidad visitante)
     if diff > 0.3: ganador = f"{local}"
     elif diff < -0.3: ganador = f"{visita}"
     else: ganador = "Empate / X"
@@ -238,10 +229,11 @@ with tab1:
             if r.status_code == 200:
                 matches = r.json()['matches']
                 if matches:
-                    tg_msg = f"🦁 *YETIPS - {liga_sel.upper()}*\n📅 {datetime.now().strftime('%d/%m')}\n\n"
+                    # HEMOS CAMBIADO EL FORMATO A HTML PARA EVITAR ERRORES
+                    tg_msg = f"🦁 <b>YETIPS - {liga_sel.upper()}</b>\n"
+                    tg_msg += f"📅 {datetime.now().strftime('%d/%m')}\n\n"
                     data_display = []
                     
-                    # Filtro: Próximos 14 días (ampliado para Champions)
                     prox_matches = []
                     for m in matches:
                         match_date = datetime.strptime(m['utcDate'][:10], "%Y-%m-%d")
@@ -255,7 +247,7 @@ with tab1:
                         d = calcular_pronostico(local, visita, stats_auto, stats_off)
                         
                         if d:
-                            tg_msg += f"🏆 *{local} vs {visita}*\n"
+                            tg_msg += f"🏆 <b>{local} vs {visita}</b>\n"
                             tg_msg += f"💎 Pick: {d['ganador']}\n"
                             tg_msg += f"⚖️ AH: {d['ah']}\n"
                             
@@ -280,34 +272,29 @@ with tab1:
                                 "Tarjetas": f"{d['cards_pick']}",
                                 "Offsides": d['off_pick']
                             })
-                        else:
-                            # Debug: Avisar qué equipo falló
-                            # st.warning(f"No se encontraron datos para {local} o {visita}") 
-                            pass
 
                     if data_display:
                         st.dataframe(pd.DataFrame(data_display), use_container_width=True)
-                       if st.button("📲 ENVIAR REPORTE A TELEGRAM"):
-    # 1. Intentamos enviar
-    url_tg = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": tg_msg, "parse_mode": "Markdown"}
-    
-    try:
-        r = requests.post(url_tg, data=payload)
-        
-        # 2. Verificamos si Telegram dijo OK (Código 200)
-        if r.status_code == 200:
-            st.success("✅ ¡Mensaje enviado correctamente!")
-            st.balloons() # Un efecto visual para confirmar
-        else:
-            # 3. Si falla, mostramos el error técnico en pantalla
-            st.error(f"❌ Error al enviar. Telegram dice: {r.text}")
-            
-    except Exception as e:
-        st.error(f"⚠️ Error de conexión: {e}")
+                        
+                        # --- BOTÓN DE TELEGRAM CORREGIDO ---
+                        if st.button("📲 ENVIAR REPORTE A TELEGRAM"):
+                            payload = {
+                                "chat_id": TG_CHAT_ID, 
+                                "text": tg_msg, 
+                                "parse_mode": "HTML" # CAMBIADO A HTML (MÁS SEGURO)
+                            }
+                            try:
+                                req = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=payload)
+                                if req.status_code == 200:
+                                    st.success("✅ ¡Mensaje enviado con éxito a Telegram!")
+                                    st.balloons()
+                                else:
+                                    st.error(f"❌ Error enviando mensaje: {req.text}")
+                            except Exception as e:
+                                st.error(f"⚠️ Error de conexión: {e}")
+
                 else:
                     st.warning("No hay partidos programados.")
 
 with tab2:
     st.write("📊 Auditoría de resultados pasados.")
-
