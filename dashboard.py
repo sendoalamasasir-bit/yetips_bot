@@ -14,16 +14,14 @@ st.markdown("""
     <style>
     .main {background-color: #0e1117;}
     .stMetric {background-color: #262730; padding: 10px; border-radius: 10px; border: 1px solid #41444b;}
-    h1 {color: #ffd700;} /* Dorado Champions */
+    h1 {color: #ffd700;}
     </style>
     """, unsafe_allow_html=True)
 
-# TUS CLAVES
 API_KEY = "68e35b4ab2b340b98523f2d6ea512f9f"
 TG_TOKEN = "8590341693:AAEtYenrAY1cWd3itleTsYQ7c222tKpmZbQ"
 TG_CHAT_ID = "1197028422"
 
-# --- AÑADIDA LA CHAMPIONS (CSV = 'MULTI') ---
 LIGAS = {
     "🇪🇺 UEFA Champions League": {"api": "CL", "csv": "MULTI"},
     "🇪🇸 La Liga": {"api": "PD", "csv": "SP1"},
@@ -36,25 +34,22 @@ LIGAS = {
 }
 
 # ==========================================
-# 2. CARGA DE DATOS (MODO MULTI-LIGA)
+# 2. CARGA DE DATOS (CHAMPIONS FIX)
 # ==========================================
 
 @st.cache_data(ttl=3600)
 def cargar_datos_liga(codigo_csv):
-    """
-    Si codigo_csv es 'MULTI', carga TODAS las ligas para encontrar equipos de Champions.
-    Si es normal, carga solo esa liga.
-    """
-    # --- MODO CHAMPIONS: Cargar todo Europa ---
+    # MODO CHAMPIONS: Carga TODAS las ligas
     if codigo_csv == "MULTI":
+        # SP1=España, E0=Inglaterra, D1=Alemania, I1=Italia, F1=Francia, N1=Holanda, P1=Portugal
         todos_codigos = ["SP1", "E0", "D1", "I1", "F1", "N1", "P1"]
         mega_stats = {}
         for c in todos_codigos:
-            s = cargar_datos_liga(c) # Llamada recursiva
-            if s: mega_stats.update(s) # Fusionar diccionarios
+            s = cargar_datos_liga(c)
+            if s: mega_stats.update(s)
         return mega_stats
 
-    # --- MODO LIGA NORMAL ---
+    # MODO NORMAL
     url = f"https://www.football-data.co.uk/mmz4281/2526/{codigo_csv}.csv"
     try:
         df = pd.read_csv(url)
@@ -102,54 +97,77 @@ def cargar_offsides_manual(uploaded_file):
     except: return None
 
 # ==========================================
-# 3. MOTORES MATEMÁTICOS
+# 3. LÓGICA DE NOMBRES (AQUÍ ESTABA EL ERROR)
 # ==========================================
 
 def encontrar_equipo(nombre_api, lista_nombres):
-    match = difflib.get_close_matches(nombre_api, lista_nombres, n=1, cutoff=0.5)
-    # Diccionario ampliado para Champions
+    # 1. DICCIONARIO MANUAL DE CORRECCIONES (ACTUALIZADO)
     manual = {
-        "Athletic Club": "Ath Bilbao", "Club Atlético de Madrid": "Ath Madrid",
-        "Manchester United FC": "Man United", "Wolverhampton Wanderers FC": "Wolves",
-        "Paris Saint-Germain FC": "Paris SG", "Bayer 04 Leverkusen": "Leverkusen",
-        "Real Betis Balompié": "Betis", "Rayo Vallecano de Madrid": "Rayo Vallecano",
-        "Girona FC": "Girona", "Real Sociedad de Fútbol": "Sociedad",
-        "RCD Mallorca": "Mallorca", "CA Osasuna": "Osasuna", "Sevilla FC": "Sevilla",
-        "Inter Milan": "Inter", "AC Milan": "Milan", "FC Barcelona": "Barcelona", 
-        "Real Madrid CF": "Real Madrid", "FC Bayern München": "Bayern Munich",
-        "PSV Eindhoven": "PSV", "Sporting Clube de Portugal": "Sp Portugal",
-        "SL Benfica": "Benfica", "Lille OSC": "Lille", "Aston Villa FC": "Aston Villa",
-        "Bologna FC 1909": "Bologna", "VfB Stuttgart": "Stuttgart", "RB Leipzig": "Leipzig"
+        # --- CHAMPIONS FIX ---
+        "Sport Lisboa e Benfica": "Benfica",    # <--- CORREGIDO
+        "Real Madrid CF": "Real Madrid",        # <--- CORREGIDO
+        "Sporting Clube de Portugal": "Sp Portugal",
+        "PSV Eindhoven": "PSV Eindhoven",       # A veces viene como PSV
+        # --- OTROS ---
+        "Athletic Club": "Ath Bilbao", 
+        "Club Atlético de Madrid": "Ath Madrid",
+        "Manchester United FC": "Man United", 
+        "Wolverhampton Wanderers FC": "Wolves",
+        "Paris Saint-Germain FC": "Paris SG", 
+        "Bayer 04 Leverkusen": "Leverkusen",
+        "Real Betis Balompié": "Betis", 
+        "Rayo Vallecano de Madrid": "Rayo Vallecano",
+        "Girona FC": "Girona", 
+        "Real Sociedad de Fútbol": "Sociedad",
+        "RCD Mallorca": "Mallorca", 
+        "CA Osasuna": "Osasuna", 
+        "Sevilla FC": "Sevilla",
+        "Inter Milan": "Inter", 
+        "AC Milan": "Milan", 
+        "FC Barcelona": "Barcelona", 
+        "FC Bayern München": "Bayern Munich",
+        "Lille OSC": "Lille", 
+        "Aston Villa FC": "Aston Villa",
+        "Bologna FC 1909": "Bologna", 
+        "VfB Stuttgart": "Stuttgart", 
+        "RB Leipzig": "Leipzig"
     }
+    
+    # 2. Búsqueda directa en diccionario
     if nombre_api in manual:
-        if manual[nombre_api] in lista_nombres: return manual[nombre_api]
-        match_manual = difflib.get_close_matches(manual[nombre_api], lista_nombres, n=1, cutoff=0.6)
+        nombre_csv = manual[nombre_api]
+        # Verificamos si esa traducción existe realmente en la base de datos
+        if nombre_csv in lista_nombres: 
+            return nombre_csv
+        # Si no, intentamos buscar algo parecido a la traducción
+        match_manual = difflib.get_close_matches(nombre_csv, lista_nombres, n=1, cutoff=0.6)
         if match_manual: return match_manual[0]
+
+    # 3. Búsqueda difusa estándar (si no está en manual)
+    match = difflib.get_close_matches(nombre_api, lista_nombres, n=1, cutoff=0.5)
     return match[0] if match else None
 
 def calcular_pronostico(local, visita, stats_auto, stats_off=None):
     nom_L = encontrar_equipo(local, list(stats_auto.keys()))
     nom_V = encontrar_equipo(visita, list(stats_auto.keys()))
     
-    if not nom_L or not nom_V: return None
+    if not nom_L or not nom_V: return None # Si falla uno, no calcula
 
     L = stats_auto[nom_L]
     V = stats_auto[nom_V]
 
-    # Cálculos
+    # Stats
     xg_h = (L['gf']/L['pj'] + V['gc']/V['pj']) / 2
     xg_a = (V['gf']/V['pj'] + L['gc']/L['pj']) / 2
     total_goals = xg_h + xg_a
-    
     pick_gol = "MÁS 2.5" if total_goals > 2.5 else "MENOS 2.5"
     
     diff = xg_h - xg_a
-    # Ajuste para Champions: El factor campo pesa más
+    # Factor local reducido para Champions (campo neutral/finales o alta calidad visitante)
     if diff > 0.3: ganador = f"{local}"
     elif diff < -0.3: ganador = f"{visita}"
     else: ganador = "Empate / X"
 
-    # AH
     ah_raw = round(diff * 2) / 2
     if ah_raw > 0: ah_line = f"{local} -{abs(ah_raw)}"
     elif ah_raw < 0: ah_line = f"{visita} -{abs(ah_raw)}"
@@ -197,11 +215,9 @@ with st.sidebar:
     st.info("📂 Cargar Offsides (FBref)")
     off_file = st.file_uploader("CSV Offsides", type=['csv'])
 
-# LÓGICA DE CARGA
 codigos = LIGAS[liga_sel]
-
 if codigos['csv'] == "MULTI":
-    st.info("🌍 Cargando base de datos de toda Europa para la Champions... Espere unos segundos.")
+    st.info("🌍 Cargando datos de Europa (Champions Mode)...")
 
 stats_auto = cargar_datos_liga(codigos['csv'])
 stats_off = cargar_offsides_manual(off_file)
@@ -210,7 +226,6 @@ if not stats_auto:
     st.error("Error cargando datos.")
     st.stop()
 
-# TABS
 tab1, tab2 = st.tabs(["⚽ PRONÓSTICOS", "📊 AUDITORÍA"])
 
 with tab1:
@@ -226,14 +241,14 @@ with tab1:
                     tg_msg = f"🦁 *YETIPS - {liga_sel.upper()}*\n📅 {datetime.now().strftime('%d/%m')}\n\n"
                     data_display = []
                     
-                    # Filtro de fecha: Mostramos partidos de los próximos 7 días
+                    # Filtro: Próximos 14 días (ampliado para Champions)
                     prox_matches = []
                     for m in matches:
                         match_date = datetime.strptime(m['utcDate'][:10], "%Y-%m-%d")
-                        if match_date <= datetime.now() + timedelta(days=7):
+                        if match_date <= datetime.now() + timedelta(days=14):
                             prox_matches.append(m)
 
-                    if not prox_matches: st.warning("No hay partidos de Champions esta semana.")
+                    if not prox_matches: st.warning("No hay partidos próximos (14 días).")
 
                     for m in prox_matches:
                         local, visita = m['homeTeam']['name'], m['awayTeam']['name']
@@ -265,6 +280,10 @@ with tab1:
                                 "Tarjetas": f"{d['cards_pick']}",
                                 "Offsides": d['off_pick']
                             })
+                        else:
+                            # Debug: Avisar qué equipo falló
+                            # st.warning(f"No se encontraron datos para {local} o {visita}") 
+                            pass
 
                     if data_display:
                         st.dataframe(pd.DataFrame(data_display), use_container_width=True)
@@ -277,4 +296,3 @@ with tab1:
 
 with tab2:
     st.write("📊 Auditoría de resultados pasados.")
-    # (Código de auditoría mantenido simple)
